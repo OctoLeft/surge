@@ -53,4 +53,6 @@ CNHK 的规则来自 [BiliBili-Redirect-tvOS](https://github.com/OctoLeft/BiliBi
 ## Apple TV 卡在第一个连接
 Apple TV 的播放器会优先用 QUIC（HTTP/3，走 UDP）连 `upos-hz-mirrorakam.akamaized.net`。在 Surge Dashboard 里能看到，这条 QUIC 连接经过 Surge 转发后，几分钟只下载了 15–17 KB，播放器就一直卡在这条连接上。手机走的是 TCP 分片，所以不受影响。
 
-模块里的 `[Rule]` 会拒绝发往 `akamaized.net`、`bilivideo.com`、`bilivideo.cn` 的 QUIC，播放器随即退回 TCP/HTTPS。
+模块里的 `[Rule]` 会拒绝发往 `akamaized.net`、`bilivideo.com`、`bilivideo.cn` 的 QUIC，播放器随即退回 TCP/HTTPS。Apple TV 实测：QUIC 被 REJECT 后，同一个视频走 HTTPS，17 秒下载了 16.8 MB。
+
+**更新模块后要在 Surge 里重新加载配置**，新加的规则才会生效。脚本改动靠 `?v=` 就能生效，规则改动不行。

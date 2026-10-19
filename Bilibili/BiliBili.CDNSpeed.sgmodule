@@ -15,8 +15,6 @@ BiliCDN.Panel = type=generic, timeout=120, script-path=https://raw.githubusercon
 # Apple TV 的播放器会优先用 QUIC (HTTP/3) 连视频 CDN；经过 Surge 转发后 QUIC 几乎不传数据
 # （实测几分钟只下了 15 KB），播放器就一直卡在这条连接上。拒绝 QUIC 后它会退回 TCP/HTTPS。
 AND,((PROTOCOL,QUIC),(OR,((DOMAIN-SUFFIX,akamaized.net),(DOMAIN-SUFFIX,bilivideo.com),(DOMAIN-SUFFIX,bilivideo.cn)))),REJECT
-# 较旧的 Surge（如 tvOS 5.x）可能不认 PROTOCOL,QUIC，再按 UDP 443 挡一次（UDP 443 就是 QUIC）
-AND,((PROTOCOL,UDP),(DEST-PORT,443),(OR,((DOMAIN-SUFFIX,akamaized.net),(DOMAIN-SUFFIX,bilivideo.com),(DOMAIN-SUFFIX,bilivideo.cn)))),REJECT
 
 [Panel]
 BiliCDN.Panel = script-name=BiliCDN.Panel, update-interval=600
