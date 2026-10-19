@@ -1,15 +1,15 @@
 #!name = 📺 BiliBili: ⚡ CDN Speed
-#!desc = 在 playurl 返回时把 B 站视频地址换成最快的线路（CNHK / 海外 ov / Akamai / 最快 upos 赛跑）。视频分片不经过 MitM。替代 Biliverse Redirect，请勿同时启用
+#!desc = 在 playurl 返回时把 B 站视频地址换成后台测出的最快线路（Akamai / 海外 ov / CNHK / upos）。视频分片不经过 MitM。替代 Biliverse Redirect，请勿同时启用
 #!category = 🪐 Biliverse
 #!homepage = https://github.com/OctoLeft/surge/tree/main/Bilibili
-#!arguments = Cron:"*/30 * * * *",MaxAge:"120",StickyMin:"30",CNHKPool:"",ProbeTimeout:"4",Build:"89600100",Buvid:"",TopN:"5",SampleKB:"2048",Notify:"false",Candidates:""
-#!arguments-desc = Cron: 后台测速频率（cron 表达式）\n\nMaxAge: upos 测速结果多少分钟内有效，过期后不改写 upos 地址\n\nStickyMin: Akamai 线路排名固定多少分钟；过期后下一次打开视频时会重新赛跑（最多 ProbeTimeout 秒）\n\nCNHKPool: 自定义 CNHK 主机池，用 | 分隔；留空用内置 7 个\n\nProbeTimeout: 播放时线路赛跑每条线路最多等几秒\n\nBuild: CNHK 地址补的 build 参数\n\nBuvid: CNHK 地址补的 buvid；留空自动生成\n\nTopN / SampleKB: 后台吞吐测试的主机数、每个主机下载的大小\n\nNotify: 后台测速完成后是否通知 (true/false)\n\nCandidates: upos 候选主机，用 | 分隔；留空用内置 15 个
+#!arguments = Cron:"*/30 * * * *",MaxAge:"120",CNHKPool:"",Build:"89600100",Buvid:"",TopN:"5",SampleKB:"2048",Notify:"false",Candidates:""
+#!arguments-desc = Cron: 后台测速频率（cron 表达式）\n\nMaxAge: 后台测速结果多少分钟内有效；过期后 upos 地址不改写，Akamai 地址按默认顺序（Akamai 优先）\n\nCNHKPool: 自定义 CNHK 主机池，用 | 分隔；留空用内置 7 个\n\nBuild: CNHK 地址补的 build 参数\n\nBuvid: CNHK 地址补的 buvid；留空自动生成\n\nTopN / SampleKB: 后台吞吐测试的主机数、每个主机下载的大小\n\nNotify: 后台测速完成后是否通知 (true/false)\n\nCandidates: upos 候选主机，用 | 分隔；留空用内置 15 个
 
 [Script]
-BiliCDN.PlayURL.grpc = type=http-response, pattern=^https?:\/\/(grpc\.biliapi\.net|app\.biliapi\.net|app\.bilibili\.com)\/bilibili\.app\.playerunite\.v1\.Player\/PlayViewUnite$, requires-body=1, binary-body-mode=1, max-size=3145728, timeout=10, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-playurl.js?v=202610191136, argument="MaxAge={{{MaxAge}}}&StickyMin={{{StickyMin}}}&CNHKPool={{{CNHKPool}}}&ProbeTimeout={{{ProbeTimeout}}}&Build={{{Build}}}&Buvid={{{Buvid}}}"
-BiliCDN.PlayURL.json = type=http-response, pattern=^https?:\/\/api\.bili(bili\.com|api\.net)\/(x\/player\/(wbi\/)?playurl|pgc\/player\/(api|web)\/playurl(\/html5)?|pgc\/player\/web\/v2\/playurl)\?, requires-body=1, max-size=3145728, timeout=10, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-playurl.js?v=202610191136, argument="MaxAge={{{MaxAge}}}&StickyMin={{{StickyMin}}}&CNHKPool={{{CNHKPool}}}&ProbeTimeout={{{ProbeTimeout}}}&Build={{{Build}}}&Buvid={{{Buvid}}}"
-BiliCDN.SpeedTest = type=cron, cronexp="{{{Cron}}}", wake-system=0, timeout=120, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-speedtest.js?v=202610191136, argument="TopN={{{TopN}}}&SampleKB={{{SampleKB}}}&Notify={{{Notify}}}&Candidates={{{Candidates}}}"
-BiliCDN.Panel = type=generic, timeout=120, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-speedtest.js?v=202610191136, argument="TopN={{{TopN}}}&SampleKB={{{SampleKB}}}&Notify=false&Candidates={{{Candidates}}}"
+BiliCDN.PlayURL.grpc = type=http-response, pattern=^https?:\/\/(grpc\.biliapi\.net|app\.biliapi\.net|app\.bilibili\.com)\/bilibili\.app\.playerunite\.v1\.Player\/PlayViewUnite$, requires-body=1, binary-body-mode=1, max-size=3145728, timeout=5, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-playurl.js?v=202610191144, argument="MaxAge={{{MaxAge}}}&CNHKPool={{{CNHKPool}}}&Build={{{Build}}}&Buvid={{{Buvid}}}"
+BiliCDN.PlayURL.json = type=http-response, pattern=^https?:\/\/api\.bili(bili\.com|api\.net)\/(x\/player\/(wbi\/)?playurl|pgc\/player\/(api|web)\/playurl(\/html5)?|pgc\/player\/web\/v2\/playurl)\?, requires-body=1, max-size=3145728, timeout=5, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-playurl.js?v=202610191144, argument="MaxAge={{{MaxAge}}}&CNHKPool={{{CNHKPool}}}&Build={{{Build}}}&Buvid={{{Buvid}}}"
+BiliCDN.SpeedTest = type=cron, cronexp="{{{Cron}}}", wake-system=0, timeout=120, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-speedtest.js?v=202610191144, argument="TopN={{{TopN}}}&SampleKB={{{SampleKB}}}&Notify={{{Notify}}}&Build={{{Build}}}&Buvid={{{Buvid}}}&Candidates={{{Candidates}}}"
+BiliCDN.Panel = type=generic, timeout=120, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-speedtest.js?v=202610191144, argument="TopN={{{TopN}}}&SampleKB={{{SampleKB}}}&Notify=false&Build={{{Build}}}&Buvid={{{Buvid}}}&Candidates={{{Candidates}}}"
 
 [Panel]
 BiliCDN.Panel = script-name=BiliCDN.Panel, update-interval=600

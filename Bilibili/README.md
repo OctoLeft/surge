@@ -11,13 +11,16 @@
 | `bili-cdn-playurl.js` | 改写 playurl (JSON) 和 PlayViewUnite (gRPC) 响应里的视频地址，并记录测速样本 |
 | `bili-cdn-speedtest.js` | 后台 cron / 面板：用样本对 15 个 upos 主机测吞吐，写入 `bili_cdn_best` |
 
-`bili-cdn-playurl.js` 分两种地址处理：
+`bili-cdn-playurl.js` 不发任何网络请求，只读后台测好的结果，所以 playurl 响应只多几毫秒。之前在这里现场赛跑，会拖住响应约 6 秒，Apple TV 上因此完全播不动。
 
 - **Akamai 签名地址**（`upos-hz-mirrorakam`，带 `os=akam` 和 `hdnts`，tvOS 上常见）
-  - 下面这些线路一起下载 1 MB 赛跑：CNHK 各主机、海外 ov 地址、Akamai 原地址、后台测出的最快 upos 主机。
-  - 最快的做主地址，其余按速度放进 `backup_url`。
-  - 排名在 `StickyMin` 分钟内固定，避免分片之间切换线路。
+  - 按后台赛跑的排名排列，第一名做主地址，其余放进 `backup_url`。参加赛跑的有：Akamai 原地址、海外 ov、CNHK 各主机、最快的 upos 主机，每条下载 1 MB。
+  - 还没有排名时用默认顺序，Akamai 优先。
 - **其他 upos 签名地址**：换成后台测出的最快主机，原地址放进 `backup_url`。
+
+`bili-cdn-speedtest.js`（cron / 面板按钮）用播放时记下的签名地址测速：
+- Akamai 线路赛跑，结果写入 `bili_cdn_choice`。
+- 15 个 upos 主机测吞吐，结果写入 `bili_cdn_best`。
 
 CNHK 的规则来自 [BiliBili-Redirect-tvOS](https://github.com/OctoLeft/BiliBili-Redirect-tvOS)：
 - 只接受 http，签名 query 必须原样保留。
@@ -33,17 +36,16 @@ CNHK 的规则来自 [BiliBili-Redirect-tvOS](https://github.com/OctoLeft/BiliBi
 `$persistentStore` 不跨设备同步，iPhone 和 Apple TV 各自测速、各自保存结果。
 
 ## 参数
-- `StickyMin`：Akamai 线路排名固定多少分钟，默认 30。过期后，下一次打开视频时会重新赛跑。
-- `ProbeTimeout`：赛跑时每条线路最多等几秒，默认 4。
 - `CNHKPool`：自定义 CNHK 主机，用 `|` 分隔。
 - `Build` / `Buvid`：CNHK 地址补的参数。`Buvid` 留空时自动生成。
-- `MaxAge`：upos 测速结果的有效期（分钟）。
+- `MaxAge`：后台测速结果的有效期（分钟），默认 120。过期后 upos 地址不改写，Akamai 地址改用默认顺序。
 - `Cron` / `TopN` / `SampleKB` / `Notify` / `Candidates`：后台 upos 测速设置。
 
 ## 排查
-- 在脚本日志里搜索 `[BiliCDN]`，能看到线路赛跑结果（`线路测速：…`）和每次改写了多少处。
+- 每次 playurl 都会在日志里留一行 `[BiliCDN]`，写明改写了几条流、主地址从哪个主机换到哪个主机、用的是测速排名还是默认顺序，以及耗时。没有这行日志，说明脚本没有被触发：检查 MitM、证书和模块是否启用。
+- 后台测速的日志是 `[BiliCDN] Akamai 线路赛跑：…`。
 - 面板会显示当前的 Akamai 线路排名和 upos 测速结果。
-- 想立刻重新赛跑，删除持久化数据里的 `bili_cdn_choice`。
+- 想立刻重新测速，点面板上的按钮。
 
 ## 维护
 改了脚本后，记得把模块里 `script-path` 末尾的 `?v=` 改成新的值。Surge 更新模块时只比较模块文件；脚本地址变了，才会重新下载脚本。

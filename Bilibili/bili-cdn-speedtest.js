@@ -3,8 +3,10 @@
  *
  * 阶段 1：所有候选并发请求一小段，测首包延迟，淘汰不可用的主机
  * 阶段 2：延迟最低的前 N 个逐个下载 SampleKB，测真实吞吐（逐个跑，避免互相抢带宽）
- * 样本是 bili-cdn-playurl.js 在 playurl 返回时记下的 upos 签名地址；没有样本时只测延迟
- * 结果写入 bili_cdn_best，供 playurl 脚本改写 upos 地址、并作为 Akamai 线路赛跑的候选之一
+ * 样本是 bili-cdn-playurl.js 在 playurl 返回时记下的签名地址：
+ * - upos 样本 → 测 15 个 upos 主机，结果写入 bili_cdn_best；没有样本时只测延迟
+ * - Akamai 样本 → Akamai / 海外 ov / CNHK 各主机 / 最快 upos 一起下载 1MB 赛跑，
+ *   排名写入 bili_cdn_choice（CNHK 写法先探测：tvOS 地址补 buvid/build，Web 地址原样）
  *
  * 作为面板时：普通刷新只显示上次结果；点按面板按钮才重新测速
  */
@@ -13,6 +15,23 @@ const KEY_BEST = "bili_cdn_best";
 const KEY_RANK = "bili_cdn_rank";
 const KEY_SAMPLE = "bili_cdn_sample";
 const KEY_CHOICE = "bili_cdn_choice";
+const KEY_SAMPLE_AKAM = "bili_cdn_sample_akam";
+const KEY_BUVID = "bili_cdn_buvid";
+const CNHK_POOL = [
+  "cn-hk-eq-01-03.bilivideo.com",
+  "cn-hk-eq-01-13.bilivideo.com",
+  "cn-hk-eq-01-12.bilivideo.com",
+  "cn-hk-eq-01-01.bilivideo.com",
+  "cn-hk-eq-01-09.bilivideo.com",
+  "cn-hk-eq-01-10.bilivideo.com",
+  "cn-hk-eq-01-14.bilivideo.com",
+];
+const OV_HOSTS = [
+  "upos-sz-mirroraliov.bilivideo.com",
+  "upos-sz-mirrorcosov.bilivideo.com",
+  "upos-sz-mirrorhwov.bilivideo.com",
+  "upos-sz-mirrorawsov.bilivideo.com",
+];
 
 const DEFAULT_CANDIDATES = [
   "upos-sz-mirrorali.bilivideo.com",
@@ -67,6 +86,8 @@ const SAMPLE_KB = Number(args.SampleKB || 2048);
 const TIMEOUT = Number(args.Timeout || 6);
 const NOTIFY = args.Notify !== "false";
 const UA = "Bilibili Freedoooooom/MarkII";
+const BUILD = args.Build || "89600100";
+const ROUTE_BYTES = 1048576; // 256KB 主要反映延迟，1MB 才能看出带宽差别
 
 function get(url, headers, timeout) {
   return new Promise((resolve) => {
@@ -115,13 +136,113 @@ async function rank(candidates, urlFor, ua, hasSample) {
   return ranked[0].speed ? ranked : alive; // 吞吐全失败（比如签名刚失效），退回延迟排名
 }
 
+// ---------- Akamai 线路赛跑（规则与 bili-cdn-playurl.js 一致）----------
+
+function getParam(url, name) {
+  const m = String(url).match(new RegExp("[?&]" + name + "=([^&#]*)"));
+  return m ? m[1] : "";
+}
+
+function setParam(url, name, value) {
+  const re = new RegExp("([?&]" + name + "=)[^&#]*");
+  if (re.test(url)) return url.replace(re, "$1" + encodeURIComponent(value));
+  return url + (url.indexOf("?") < 0 ? "?" : "&") + name + "=" + encodeURIComponent(value);
+}
+
+function withHost(url, scheme, host) {
+  return String(url).replace(/^[a-z][a-z\d+.-]*:\/\/[^/?#]+/i, scheme + "//" + host);
+}
+
+function buvid() {
+  let v = args.Buvid || $persistentStore.read(KEY_BUVID);
+  if (!v) {
+    const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    v = "YF";
+    for (let i = 0; i < 42; i++) v += chars[Math.floor(Math.random() * chars.length)];
+    $persistentStore.write(v, KEY_BUVID);
+  }
+  return v;
+}
+
+function buildCNHKURL(akamURL, host, variant) {
+  let url = withHost(akamURL, "http:", host);
+  if (variant === "raw") return url;
+  let signed = getParam(akamURL, "uparams");
+  try {
+    signed = decodeURIComponent(signed);
+  } catch (e) {}
+  signed = signed.split(",");
+  if (signed.indexOf("buvid") < 0 && !getParam(url, "buvid")) url = setParam(url, "buvid", buvid());
+  const build = getParam(url, "build");
+  if (signed.indexOf("build") < 0 && (!build || build === "0")) url = setParam(url, "build", BUILD);
+  return url;
+}
+
+async function detectVariant(akamURL, headers) {
+  const tries = [];
+  for (const variant of ["params", "raw"]) {
+    for (const h of CNHK_POOL.slice(0, 2)) {
+      tries.push(get(buildCNHKURL(akamURL, h, variant), Object.assign({ Range: "bytes=0-1023" }, headers), 4).then((r) => (r.status === 206 ? variant : null)));
+    }
+  }
+  const ok = (await Promise.all(tries)).filter(Boolean);
+  return ok.indexOf("params") >= 0 ? "params" : ok[0] || null;
+}
+
+async function routeRace(sample) {
+  const headers = { Referer: "https://www.bilibili.com", "User-Agent": sample.ua };
+  const akam = sample.url;
+  const ov = sample.ov || "";
+  const variant = await detectVariant(akam, headers);
+  const keys = ["akam"];
+  const urls = { akam };
+  if (ov) {
+    keys.push("ov");
+    urls.ov = ov;
+  }
+  if (variant) CNHK_POOL.forEach((h) => { keys.push("cnhk:" + h); urls["cnhk:" + h] = buildCNHKURL(akam, h, variant); });
+  const best = readJSON(KEY_BEST);
+  if (ov && best && best.host && best.mode === "throughput" && OV_HOSTS.indexOf(best.host) < 0 && !/^cn-hk-eq-/.test(best.host)) {
+    keys.push("upos:" + best.host);
+    urls["upos:" + best.host] = withHost(ov, "https:", best.host);
+  }
+  const results = await Promise.all(keys.map((k, i) => get(urls[k], Object.assign({ Range: "bytes=0-" + (ROUTE_BYTES - 1) }, headers), TIMEOUT).then((r) => ({ key: k, index: i, bps: r.status === 206 && r.bytes ? (r.bytes * 1000) / Math.max(r.ms, 1) : 0 }))));
+  const ok = results.filter((r) => r.bps > 0).sort((a, b) => b.bps - a.bps || a.index - b.index);
+  if (!ok.length) return null;
+  const order = ok.map((r) => r.key).concat(keys.filter((k) => !ok.some((r) => r.key === k)));
+  const choice = { order, variant, platform: getParam(akam, "platform"), bps: ok[0].bps, speeds: ok.map((r) => [r.key, Math.round(r.bps)]), time: Date.now() };
+  writeJSON(KEY_CHOICE, choice);
+  return choice;
+}
+
 async function speedTest() {
+  const akam = usableSample(KEY_SAMPLE_AKAM);
+  if (akam) {
+    const raw = readJSON(KEY_SAMPLE_AKAM);
+    akam.ov = raw && raw.ov;
+    const choice = await routeRace(akam);
+    console.log("[BiliCDN] Akamai 线路赛跑：" + (choice ? choice.speeds.map((x) => x[0].replace(".bilivideo.com", "") + "@" + fmtSpeed(x[1])).join(", ") : "全部失败"));
+  }
+
   const sample = usableSample(KEY_SAMPLE);
   const pathQuery = sample ? sample.url.replace(/^https?:\/\/[^/]+/, "") : "/";
   const ranked = await rank(CANDIDATES, (h) => "https://" + h + pathQuery, sample ? sample.ua : UA, !!sample);
-  if (!ranked.length) throw new Error("所有候选 CDN 都不可达");
+  if (!ranked.length) {
+    if (akam) return;
+    throw new Error("所有候选 CDN 都不可达");
+  }
   writeJSON(KEY_BEST, { host: ranked[0].host, mode: sample ? "throughput" : "latency", speed: ranked[0].speed || 0, latency: ranked[0].latency, time: Date.now() });
   writeJSON(KEY_RANK, ranked.slice(0, 5));
+}
+
+function fmtSpeed(bps) {
+  if (!bps) return "-";
+  const mbps = (bps * 8) / 1e6;
+  return mbps >= 1 ? mbps.toFixed(1) + " Mbps" : ((bps * 8) / 1e3).toFixed(0) + " Kbps";
+}
+
+function shortName(host) {
+  return host.replace(/\.bilivideo\.com$/, "").replace(/^upos-sz-mirror/, "");
 }
 
 function hhmm(t) {

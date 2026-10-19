@@ -1,16 +1,19 @@
 /*
  * BiliBili CDN Speed — 播放地址改写脚本 (type=http-response)
  *
- * 在 playurl (JSON) / PlayViewUnite (gRPC) 返回时就把视频地址换成最快的 CDN，
- * 之后播放器直接请求目标主机，视频分片不再经过 MitM 和脚本（Apple TV 卡顿的主要原因）。
+ * 在 playurl (JSON) / PlayViewUnite (gRPC) 返回时就把视频地址换成最快的线路，
+ * 之后播放器直接请求目标主机，视频分片不再经过 MitM 和脚本。
  *
- * 两种地址分开处理（CNHK 规则移植自 OctoLeft/BiliBili-Redirect-tvOS）：
- * - Akamai 签名地址（upos-hz-mirrorakam，os=akam + hdnts，tvOS 常见）：CNHK 各主机、
- *   海外 ov 地址、Akamai 原地址、后台测出的最快 upos 主机一起下载 1MB 赛跑，最快的做主地址，
- *   其余按速度放进 backup_url；StickyMin 分钟内固定这个排名。CNHK 只接受 http，原样保留签名
- *   query；tvOS 地址需补 buvid/build，Web 地址补了反而 403，所以先探测用哪种写法。
- * - 其他 upos 签名地址：换成 bili-cdn-speedtest.js 测出的最快主机，原地址放进 backup_url。
- * 同时把签名地址存为测速样本，供后台测速用真实分片测吞吐。
+ * 这个脚本不发任何网络请求，只读后台测好的结果，所以不会拖慢 playurl 响应。
+ * （之前在这里现场赛跑，要拖住响应约 6 秒，Apple TV 上会导致完全播不动。）
+ *
+ * - Akamai 签名地址（upos-hz-mirrorakam，os=akam + hdnts，tvOS 常见）：按 bili-cdn-speedtest.js
+ *   测出的线路排名（bili_cdn_choice：Akamai / 海外 ov / CNHK / 最快 upos）排列，第一名做主地址；
+ *   还没有排名时默认 Akamai 优先（澳大利亚实测 Akamai 15–67 Mbps，ov 只有 0.6–3.8 Mbps）。
+ *   CNHK 规则移植自 OctoLeft/BiliBili-Redirect-tvOS：只接受 http、原样保留签名 query，
+ *   按 platform 决定是否补 buvid/build（写法由后台测速探测）。
+ * - 其他 upos 签名地址：换成后台测出的最快主机，原地址放进 backup_url。
+ * 同时把签名地址存为测速样本，供后台测速用真实分片测试。
  */
 
 const KEY_BEST = "bili_cdn_best";
@@ -34,9 +37,6 @@ const OV_HOSTS = [
   "upos-sz-mirrorhwov.bilivideo.com",
   "upos-sz-mirrorawsov.bilivideo.com",
 ];
-// 256KB 主要反映延迟，1MB 才能看出带宽差别（实测 Akamai 15–67 Mbps，ov 只有 0.6–3.8 Mbps）
-const PROBE_RANGE = "bytes=0-1048575";
-const PROBE_BYTES = 1048576;
 
 function parseArgs(raw) {
   const out = {};
@@ -66,8 +66,6 @@ function writeJSON(key, value) {
 
 const args = parseArgs(typeof $argument === "undefined" ? "" : $argument);
 const MAX_AGE_MIN = Number(args.MaxAge || 120);
-const STICKY_MIN = Number(args.StickyMin || 30);
-const PROBE_TIMEOUT_MS = Number(args.ProbeTimeout || 4) * 1000;
 const TVOS_BUILD = args.Build || "89600100";
 const CNHK_POOL = args.CNHKPool
   ? args.CNHKPool.split(/[,|]/).map((s) => s.trim()).filter(isCNHKHost)
@@ -143,56 +141,15 @@ function buildCNHKURL(akamURL, host, variant) {
   return url;
 }
 
-// ---------- 测速 ----------
-
 function userAgent() {
   const h = $request.headers || {};
   for (const k of Object.keys(h)) if (k.toLowerCase() === "user-agent") return h[k];
   return "Bilibili Freedoooooom/MarkII";
 }
 
-function probe(url, index, range) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    let settled = false;
-    const finish = (r) => {
-      if (!settled) {
-        settled = true;
-        resolve(r);
-      }
-    };
-    setTimeout(() => finish(null), PROBE_TIMEOUT_MS);
-    $httpClient.get(
-      {
-        url,
-        timeout: Math.ceil(PROBE_TIMEOUT_MS / 1000) + 1,
-        "binary-mode": true,
-        "auto-redirect": false,
-        headers: { Accept: "application/octet-stream", Range: range || PROBE_RANGE, "User-Agent": userAgent(), Referer: "https://www.bilibili.com" },
-      },
-      (err, resp) => {
-        if (err || !resp || resp.status !== 206) return finish(null);
-        const ms = Math.max(Date.now() - start, 1);
-        const bytes = range ? 1024 : PROBE_BYTES;
-        finish({ host: hostOf(url), index, bps: (bytes * 1000) / ms });
-      }
-    );
-  });
-}
+// ---------- Akamai 签名地址：按后台线路排名排列 ----------
 
-// ---------- Akamai 签名地址：CNHK / ov / Akamai / 最快 upos 一起赛跑 ----------
-
-// 用池里前两个主机快速判断 CNHK 接受哪种写法；都不行就说明这个视频不能走 CNHK
-async function detectVariant(akamURL) {
-  const tries = [];
-  for (const variant of ["params", "raw"]) {
-    for (const h of CNHK_POOL.slice(0, 2)) tries.push(probe(buildCNHKURL(akamURL, h, variant), 0, "bytes=0-1023").then((r) => (r ? variant : null)));
-  }
-  const ok = (await Promise.all(tries)).filter(Boolean);
-  return ok.indexOf("params") >= 0 ? "params" : ok[0] || null;
-}
-
-// 候选的 key 只描述“用哪条线路”，这样同一次排名可以套用到其他清晰度和后续视频
+// 候选的 key 只描述“用哪条线路”，同一份排名可以套用到所有清晰度、音频和后续视频
 function candidateURL(key, ctx) {
   if (key === "akam") return ctx.akam;
   if (key === "ov") return ctx.ov;
@@ -201,40 +158,26 @@ function candidateURL(key, ctx) {
   return "";
 }
 
-let choicePromise = null;
+let routeInfo = null;
 
-// 同一次脚本里只测一次；StickyMin 分钟内直接复用上次排名，避免分片之间换线路。
-// 返回 { order, variant }，让同一响应里的其他流（其他清晰度、音频）套用同一结果
-function rankRoutes(ctx) {
-  if (choicePromise) return choicePromise;
-  choicePromise = (async () => {
-    const platform = getParam(ctx.akam, "platform");
-    const cached = readJSON(KEY_CHOICE);
-    if (cached && cached.order && cached.platform === platform && Date.now() - cached.time < STICKY_MIN * 60000) {
-      return { order: cached.order, variant: cached.variant || null };
-    }
-    ctx.variant = await detectVariant(ctx.akam);
-    const keys = ["akam"];
-    if (ctx.ov) keys.push("ov");
-    if (ctx.variant) CNHK_POOL.forEach((h) => keys.push("cnhk:" + h));
-    const best = readJSON(KEY_BEST);
-    if (ctx.ov && best && best.host && best.mode === "throughput" && Date.now() - best.time < MAX_AGE_MIN * 60000 && best.host !== hostOf(ctx.ov) && !isCNHKHost(best.host)) {
-      keys.push("upos:" + best.host);
-    }
-    const results = await Promise.all(keys.map((k, i) => probe(candidateURL(k, ctx), i).then((r) => (r ? { key: k, index: i, bps: r.bps } : null))));
-    const ok = results.filter(Boolean).sort((a, b) => (Math.abs(a.bps - b.bps) <= 1024 ? a.index - b.index : b.bps - a.bps));
-    const order = ok.map((r) => r.key).concat(keys.filter((k) => !ok.some((r) => r.key === k)));
-    writeJSON(KEY_CHOICE, { order, variant: ctx.variant, platform, bps: ok.length ? ok[0].bps : 0, time: Date.now() });
-    console.log("[BiliCDN] 线路测速：" + (ok.map((r) => r.key.replace(".bilivideo.com", "") + "@" + ((r.bps * 8) / 1e6).toFixed(1) + "Mbps").join(", ") || "全部超时，保留原地址"));
-    return { order: ok.length ? order : ["akam"].concat(order.filter((k) => k !== "akam")), variant: ctx.variant };
-  })();
-  return choicePromise;
+function routeOrder(akamURL) {
+  if (routeInfo) return routeInfo;
+  const platform = getParam(akamURL, "platform");
+  const cached = readJSON(KEY_CHOICE);
+  if (cached && cached.order && cached.platform === platform && Date.now() - cached.time < MAX_AGE_MIN * 60000) {
+    routeInfo = { order: cached.order, variant: cached.variant || null, source: "测速排名" };
+  } else {
+    // 没有（或过期的）排名：Akamai 优先，其次海外 ov；CNHK 写法未知时不放进去
+    const variant = cached && cached.platform === platform ? cached.variant || null : null;
+    const order = ["akam", "ov"].concat(variant ? CNHK_POOL.map((h) => "cnhk:" + h) : []);
+    routeInfo = { order, variant, source: "默认顺序（还没有测速排名）" };
+  }
+  return routeInfo;
 }
 
-async function akamaiPlan(akamURL, all) {
-  const ctx = { akam: akamURL, ov: all.filter((u) => OV_HOSTS.indexOf(hostOf(u)) >= 0)[0] || "", variant: null };
-  const { order, variant } = await rankRoutes(ctx);
-  ctx.variant = variant;
+function akamaiPlan(akamURL, all) {
+  const { order, variant } = routeOrder(akamURL);
+  const ctx = { akam: akamURL, ov: all.filter((u) => OV_HOSTS.indexOf(hostOf(u)) >= 0)[0] || "", variant };
   const urls = unique(order.map((k) => candidateURL(k, ctx)));
   if (!urls.length) return null;
   return { primary: urls[0], backups: unique(urls.slice(1).concat(all)).filter((u) => u !== urls[0]) };
@@ -255,12 +198,13 @@ function rememberSample(all) {
   const ua = userAgent();
   const akam = all.filter(isAkamaiSigned)[0];
   const upos = all.filter(isUposSigned)[0];
-  if (akam) writeJSON(KEY_SAMPLE_AKAM, { url: akam, ua, deadline: Number(getParam(akam, "deadline")) || 0, time: Date.now() });
+  const ov = all.filter((u) => OV_HOSTS.indexOf(hostOf(u)) >= 0)[0] || "";
+  if (akam) writeJSON(KEY_SAMPLE_AKAM, { url: akam, ov, ua, deadline: Number(getParam(akam, "deadline")) || 0, time: Date.now() });
   if (upos) writeJSON(KEY_SAMPLE, { url: upos, ua, deadline: Number(getParam(upos, "deadline")) || 0, time: Date.now() });
   sampled = !!(akam || upos);
 }
 
-async function planFor(primary, backups) {
+function planFor(primary, backups) {
   const all = unique([primary].concat(backups || [])).filter((u) => /^https?:\/\//.test(u));
   if (!all.length) return null;
   rememberSample(all);
@@ -289,8 +233,9 @@ async function rewriteJSON(node) {
   if (mainKey) {
     const backupKeys = ["backup_url", "backupUrl", "backup_urls", "backupUrls"].filter((k) => Array.isArray(node[k]));
     const backups = [].concat.apply([], backupKeys.map((k) => node[k]));
-    const plan = await planFor(node[mainKey], backups);
+    const plan = planFor(node[mainKey], backups);
     if (plan && plan.primary) {
+      if (plan.primary !== node[mainKey]) noteChange(node[mainKey], plan.primary);
       for (const k of ["base_url", "baseUrl", "url"]) {
         if (typeof node[k] === "string" && node[k] !== plan.primary) {
           node[k] = plan.primary;
@@ -415,9 +360,10 @@ async function rewriteUrlItem(buf, spec) {
   const primary = utf8Decode(buf.subarray(urlField.valStart, urlField.end));
   if (!primary || !/^https?:\/\//.test(primary)) return buf;
   const backups = fields.filter((f) => f.no === spec.backup && f.wt === 2).map((f) => utf8Decode(buf.subarray(f.valStart, f.end))).filter(Boolean);
-  const plan = await planFor(primary, backups);
+  const plan = planFor(primary, backups);
   if (!plan || !plan.primary || (plan.primary === primary && sameList(plan.backups, backups))) return buf;
   pbCount++;
+  if (plan.primary !== primary) noteChange(primary, plan.primary);
   const parts = [];
   let backupsWritten = false;
   const emitBackups = () => {
@@ -502,6 +448,26 @@ function deleteHeader(headers, name) {
   for (const k of Object.keys(headers)) if (k.toLowerCase() === name) delete headers[k];
 }
 
+// 诊断：记下每条流原来和改写后的主地址主机，最后汇总成一行日志
+const changes = {};
+
+function noteChange(from, to) {
+  const k = hostOf(from).replace(".bilivideo.com", "") + " → " + hostOf(to).replace(".bilivideo.com", "");
+  changes[k] = (changes[k] || 0) + 1;
+}
+
+function summary() {
+  const parts = Object.keys(changes).map((k) => k + " ×" + changes[k]);
+  return (parts.join("，") || "无") + (routeInfo ? "；Akamai 线路：" + routeInfo.source + " " + routeInfo.order.slice(0, 3).join(" > ") : "");
+}
+
+const started = Date.now();
+const apiName = ($request.url.match(/\/([^/?]+)(\?|$)/) || [])[1] || "";
+
+function log(msg) {
+  console.log("[BiliCDN] " + apiName + " " + msg + "（" + (Date.now() - started) + "ms）");
+}
+
 (async () => {
   const headers = Object.assign({}, $response.headers);
   let ctype = "";
@@ -509,11 +475,11 @@ function deleteHeader(headers, name) {
 
   if (/grpc/.test(ctype)) {
     const raw = $response.body instanceof Uint8Array ? $response.body : new Uint8Array($response.body || []);
-    if (raw.length < 5) return $done({});
+    if (raw.length < 5) return log("gRPC 响应为空，未改写"), $done({});
     const body = grpcDecode(raw);
     const next = await rewriteMessage(body, "Reply");
-    if (next === body) return $done({});
-    console.log("[BiliCDN] PlayViewUnite 改写 " + pbCount + " 条地址");
+    if (next === body) return log("gRPC " + raw.length + "B（压缩=" + raw[0] + "），没有可改写的地址"), $done({});
+    log("gRPC 改写 " + pbCount + " 条流：" + summary());
     deleteHeader(headers, "content-length");
     // 改写后统一不压缩，同时去掉压缩声明
     deleteHeader(headers, "grpc-encoding");
@@ -523,13 +489,14 @@ function deleteHeader(headers, name) {
   if (/json/.test(ctype) || /^\s*\{/.test($response.body || "")) {
     const json = JSON.parse($response.body || "{}");
     const count = await rewriteJSON(json);
-    if (!count) return $done({});
-    console.log("[BiliCDN] playurl 改写 " + count + " 处");
+    if (!count) return log("JSON（code=" + json.code + "），没有可改写的地址"), $done({});
+    log("JSON 改写 " + count + " 处：" + summary());
     deleteHeader(headers, "content-length");
     return $done({ body: JSON.stringify(json), headers });
   }
+  log("未识别的响应类型 " + (ctype || "(无)") + "，未改写");
   $done({});
 })().catch((e) => {
-  console.log("[BiliCDN] playurl error: " + e);
+  log("出错，已放行原响应：" + e);
   $done({});
 });
