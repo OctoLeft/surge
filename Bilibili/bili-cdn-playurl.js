@@ -6,7 +6,7 @@
  *
  * 两种地址分开处理（CNHK 规则移植自 OctoLeft/BiliBili-Redirect-tvOS）：
  * - Akamai 签名地址（upos-hz-mirrorakam，os=akam + hdnts，tvOS 常见）：CNHK 各主机、
- *   海外 ov 地址、Akamai 原地址、后台测出的最快 upos 主机一起下载 256KB 赛跑，最快的做主地址，
+ *   海外 ov 地址、Akamai 原地址、后台测出的最快 upos 主机一起下载 1MB 赛跑，最快的做主地址，
  *   其余按速度放进 backup_url；StickyMin 分钟内固定这个排名。CNHK 只接受 http，原样保留签名
  *   query；tvOS 地址需补 buvid/build，Web 地址补了反而 403，所以先探测用哪种写法。
  * - 其他 upos 签名地址：换成 bili-cdn-speedtest.js 测出的最快主机，原地址放进 backup_url。
@@ -34,8 +34,9 @@ const OV_HOSTS = [
   "upos-sz-mirrorhwov.bilivideo.com",
   "upos-sz-mirrorawsov.bilivideo.com",
 ];
-const PROBE_RANGE = "bytes=0-262143";
-const PROBE_BYTES = 262144;
+// 256KB 主要反映延迟，1MB 才能看出带宽差别（实测 Akamai 15–67 Mbps，ov 只有 0.6–3.8 Mbps）
+const PROBE_RANGE = "bytes=0-1048575";
+const PROBE_BYTES = 1048576;
 
 function parseArgs(raw) {
   const out = {};
@@ -66,7 +67,7 @@ function writeJSON(key, value) {
 const args = parseArgs(typeof $argument === "undefined" ? "" : $argument);
 const MAX_AGE_MIN = Number(args.MaxAge || 120);
 const STICKY_MIN = Number(args.StickyMin || 30);
-const PROBE_TIMEOUT_MS = Number(args.ProbeTimeout || 3) * 1000;
+const PROBE_TIMEOUT_MS = Number(args.ProbeTimeout || 4) * 1000;
 const TVOS_BUILD = args.Build || "89600100";
 const CNHK_POOL = args.CNHKPool
   ? args.CNHKPool.split(/[,|]/).map((s) => s.trim()).filter(isCNHKHost)

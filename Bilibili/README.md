@@ -14,7 +14,7 @@
 `bili-cdn-playurl.js` 分两种地址处理：
 
 - **Akamai 签名地址**（`upos-hz-mirrorakam`，带 `os=akam` 和 `hdnts`，tvOS 上常见）
-  - 下面这些线路一起下载 256 KB 赛跑：CNHK 各主机、海外 ov 地址、Akamai 原地址、后台测出的最快 upos 主机。
+  - 下面这些线路一起下载 1 MB 赛跑：CNHK 各主机、海外 ov 地址、Akamai 原地址、后台测出的最快 upos 主机。
   - 最快的做主地址，其余按速度放进 `backup_url`。
   - 排名在 `StickyMin` 分钟内固定，避免分片之间切换线路。
 - **其他 upos 签名地址**：换成后台测出的最快主机，原地址放进 `backup_url`。
@@ -23,7 +23,7 @@ CNHK 的规则来自 [BiliBili-Redirect-tvOS](https://github.com/OctoLeft/BiliBi
 - 只接受 http，签名 query 必须原样保留。
 - tvOS 客户端的地址要补 `buvid` 和 `build`；Web 端（`platform=pc`）的地址补了反而返回 403。所以脚本会先探测哪种写法能用，并按 `platform` 记住结果。
 
-在澳大利亚实测（2026-10-19），Akamai 原地址约 4.3 Mbps，ov 约 1.8 Mbps，CNHK 只有 0.8–0.9 Mbps。不同网络的结果差别很大，所以脚本靠赛跑决定，不预设优先哪条线路。
+在澳大利亚实测（2026-10-19，下载 8 MB）：Akamai 15–67 Mbps，海外 ov 只有 0.6–3.8 Mbps，CNHK 不到 1 Mbps。B 站有时会把 ov 地址放在主地址、Akamai 放在备用，这就是卡顿的来源。不同网络的结果差别很大，所以脚本靠赛跑决定，不预设优先哪条线路。
 
 ## 安装
 1. **iOS**：Surge → 模块 → 安装新模块 → 填入上面的地址。**Apple TV**：Surge → 模块 → 从 URL 安装。
@@ -34,7 +34,7 @@ CNHK 的规则来自 [BiliBili-Redirect-tvOS](https://github.com/OctoLeft/BiliBi
 
 ## 参数
 - `StickyMin`：Akamai 线路排名固定多少分钟，默认 30。过期后，下一次打开视频时会重新赛跑。
-- `ProbeTimeout`：赛跑时每条线路最多等几秒，默认 3。
+- `ProbeTimeout`：赛跑时每条线路最多等几秒，默认 4。
 - `CNHKPool`：自定义 CNHK 主机，用 `|` 分隔。
 - `Build` / `Buvid`：CNHK 地址补的参数。`Buvid` 留空时自动生成。
 - `MaxAge`：upos 测速结果的有效期（分钟）。
