@@ -44,3 +44,6 @@ CNHK 的规则来自 [BiliBili-Redirect-tvOS](https://github.com/OctoLeft/BiliBi
 - 在脚本日志里搜索 `[BiliCDN]`，能看到线路赛跑结果（`线路测速：…`）和每次改写了多少处。
 - 面板会显示当前的 Akamai 线路排名和 upos 测速结果。
 - 想立刻重新赛跑，删除持久化数据里的 `bili_cdn_choice`。
+
+## 维护
+改了脚本后，记得把模块里 `script-path` 末尾的 `?v=` 改成新的值。Surge 更新模块时只比较模块文件；脚本地址变了，才会重新下载脚本。
