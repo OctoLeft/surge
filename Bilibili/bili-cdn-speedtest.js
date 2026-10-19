@@ -3,8 +3,8 @@
  *
  * 阶段 1：所有候选并发请求一小段，测首包延迟，淘汰不可用的主机
  * 阶段 2：延迟最低的前 N 个逐个下载 SampleKB，测真实吞吐（逐个跑，避免互相抢带宽）
- * 有最近一次播放记录下的带签名 URL 时用它测真实视频分片；没有则只测延迟
- * 结果写入 bili_cdn_best，由 bili-cdn-redirect.js 使用
+ * 样本是 bili-cdn-playurl.js 在 playurl 返回时记下的 upos 签名地址；没有样本时只测延迟
+ * 结果写入 bili_cdn_best，供 playurl 脚本改写 upos 地址、并作为 Akamai 线路赛跑的候选之一
  *
  * 作为面板时：普通刷新只显示上次结果；点按面板按钮才重新测速
  */
@@ -12,6 +12,7 @@
 const KEY_BEST = "bili_cdn_best";
 const KEY_RANK = "bili_cdn_rank";
 const KEY_SAMPLE = "bili_cdn_sample";
+const KEY_CHOICE = "bili_cdn_choice";
 
 const DEFAULT_CANDIDATES = [
   "upos-sz-mirrorali.bilivideo.com",
@@ -45,6 +46,10 @@ function parseArgs(raw) {
   return out;
 }
 
+function writeJSON(key, value) {
+  $persistentStore.write(JSON.stringify(value), key);
+}
+
 function readJSON(key) {
   try {
     return JSON.parse($persistentStore.read(key) || "null");
@@ -67,7 +72,7 @@ function get(url, headers, timeout) {
   return new Promise((resolve) => {
     const start = Date.now();
     $httpClient.get(
-      { url, headers: Object.assign({ "X-BiliCDN-Probe": "1" }, headers), timeout, "binary-mode": true },
+      { url, headers: headers, timeout, "binary-mode": true },
       (err, resp, data) => {
         const ms = Date.now() - start;
         const ok = !err && resp && (resp.status === 200 || resp.status === 206);
@@ -78,91 +83,85 @@ function get(url, headers, timeout) {
   });
 }
 
-// 有可用签名 URL 就返回 { path+query, ua }，否则 null
-function usableSample() {
-  const s = readJSON(KEY_SAMPLE);
+// 签名样本还有效就返回，否则 null（过期前至少留 2 分钟；没有 deadline 时按 2 小时估算）
+function usableSample(key) {
+  const s = readJSON(key);
   if (!s || !s.url) return null;
   const nowSec = Date.now() / 1000;
-  // 签名过期前至少留 2 分钟；没有 deadline 字段时按 2 小时有效估算
   if (s.deadline ? s.deadline - nowSec < 120 : Date.now() - s.time > 2 * 3600 * 1000) return null;
-  const m = s.url.match(/^https?:\/\/[^/]+(\/.*)$/);
-  return m ? { pathQuery: m[1], ua: s.ua || UA } : null;
+  return { url: s.url, ua: s.ua || UA };
 }
 
-function fmtSpeed(bps) {
-  if (!bps) return "-";
-  const mbps = (bps * 8) / 1e6;
-  return mbps >= 1 ? mbps.toFixed(1) + " Mbps" : ((bps * 8) / 1e3).toFixed(0) + " Kbps";
-}
-
-function shortName(host) {
-  return host.replace(/\.bilivideo\.com$/, "").replace(/^upos-sz-mirror/, "");
-}
-
-async function speedTest() {
-  const sample = usableSample();
-  const baseHeaders = { Referer: "https://www.bilibili.com/", "User-Agent": sample ? sample.ua : UA };
-  const urlFor = (host) => "https://" + host + (sample ? sample.pathQuery : "/");
-
-  // 阶段 1：并发测延迟
+// 阶段 1 并发测延迟，阶段 2 对前 N 名逐个测吞吐；hasSample=false 时只测延迟
+async function rank(candidates, urlFor, ua, hasSample) {
+  const headers = { Referer: "https://www.bilibili.com/", "User-Agent": ua };
   const latency = await Promise.all(
-    CANDIDATES.map(async (host) => {
-      const r = await get(urlFor(host), Object.assign({ Range: "bytes=0-1023" }, baseHeaders), Math.min(TIMEOUT, 4));
+    candidates.map(async (host) => {
+      const r = await get(urlFor(host), Object.assign({ Range: "bytes=0-1023" }, headers), Math.min(TIMEOUT, 4));
       // 没有样本时请求的是 "/"，任何 HTTP 响应都说明主机可达
-      const reachable = sample ? r.ok : r.status > 0;
+      const reachable = hasSample ? r.ok : r.status > 0;
       return { host, latency: reachable ? r.ms : Infinity };
     })
   );
   const alive = latency.filter((x) => x.latency !== Infinity).sort((a, b) => a.latency - b.latency);
-  if (!alive.length) throw new Error("所有候选 CDN 都不可达");
-
-  let ranked;
-  if (sample) {
-    // 阶段 2：前 N 名逐个测吞吐
-    const top = alive.slice(0, TOP_N);
-    const end = SAMPLE_KB * 1024 - 1;
-    for (const item of top) {
-      const r = await get(urlFor(item.host), Object.assign({ Range: "bytes=0-" + end }, baseHeaders), TIMEOUT);
-      item.speed = r.ok && r.bytes ? (r.bytes * 1000) / Math.max(r.ms, 1) : 0;
-    }
-    ranked = top.sort((a, b) => b.speed - a.speed || a.latency - b.latency);
-    if (!ranked[0].speed) ranked = alive; // 吞吐全失败（比如签名刚失效），退回延迟排名
-  } else {
-    ranked = alive;
+  if (!alive.length || !hasSample) return alive;
+  const top = alive.slice(0, TOP_N);
+  const end = SAMPLE_KB * 1024 - 1;
+  for (const item of top) {
+    const r = await get(urlFor(item.host), Object.assign({ Range: "bytes=0-" + end }, headers), TIMEOUT);
+    item.speed = r.ok && r.bytes ? (r.bytes * 1000) / Math.max(r.ms, 1) : 0;
   }
-
-  const best = { host: ranked[0].host, mode: sample ? "throughput" : "latency", speed: ranked[0].speed || 0, latency: ranked[0].latency, time: Date.now() };
-  $persistentStore.write(JSON.stringify(best), KEY_BEST);
-  $persistentStore.write(JSON.stringify(ranked.slice(0, 5)), KEY_RANK);
-  return { best, ranked };
+  const ranked = top.sort((a, b) => b.speed - a.speed || a.latency - b.latency);
+  return ranked[0].speed ? ranked : alive; // 吞吐全失败（比如签名刚失效），退回延迟排名
 }
 
-function summary(best, ranked) {
-  const lines = (ranked || []).slice(0, 5).map(
-    (r, i) => `${i + 1}. ${shortName(r.host)}  ${r.speed ? fmtSpeed(r.speed) + " · " : ""}${Math.round(r.latency)}ms`
-  );
-  const when = new Date(best.time);
-  const hhmm = ("0" + when.getHours()).slice(-2) + ":" + ("0" + when.getMinutes()).slice(-2);
-  const mode = best.mode === "throughput" ? "吞吐" : best.mode === "latency" ? "仅延迟（先播一个视频可测吞吐）" : "播放时竞速";
-  return { head: `最快：${shortName(best.host)}`, body: [`${hhmm} · ${mode}`].concat(lines).join("\n") };
+async function speedTest() {
+  const sample = usableSample(KEY_SAMPLE);
+  const pathQuery = sample ? sample.url.replace(/^https?:\/\/[^/]+/, "") : "/";
+  const ranked = await rank(CANDIDATES, (h) => "https://" + h + pathQuery, sample ? sample.ua : UA, !!sample);
+  if (!ranked.length) throw new Error("所有候选 CDN 都不可达");
+  writeJSON(KEY_BEST, { host: ranked[0].host, mode: sample ? "throughput" : "latency", speed: ranked[0].speed || 0, latency: ranked[0].latency, time: Date.now() });
+  writeJSON(KEY_RANK, ranked.slice(0, 5));
+}
+
+function hhmm(t) {
+  const d = new Date(t);
+  return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+}
+
+// 面板/通知内容：Akamai 线路赛跑结果（播放时测）和 upos 测速结果各一段
+function summary() {
+  const best = readJSON(KEY_BEST);
+  const ranked = readJSON(KEY_RANK) || [];
+  const choice = readJSON(KEY_CHOICE);
+  const lines = [];
+  let head = "还没有结果";
+  if (choice && choice.order && choice.order.length) {
+    const route = (k) => shortName(k.replace(/^(cnhk|upos):/, ""));
+    head = "线路 " + route(choice.order[0]);
+    lines.push(`Akamai 线路 · ${hhmm(choice.time)} · ${choice.bps ? fmtSpeed(choice.bps) : "-"}：` + choice.order.slice(0, 3).map(route).join(" > "));
+  }
+  if (best && best.host) {
+    const mode = best.mode === "throughput" ? "吞吐" : "仅延迟（先播一个视频可测吞吐）";
+    if (!choice) head = "最快 " + shortName(best.host);
+    lines.push(`upos · ${hhmm(best.time)} · ${mode}`);
+    ranked.slice(0, 5).forEach((r, i) => lines.push(`${i + 1}. ${shortName(r.host)}  ${r.speed ? fmtSpeed(r.speed) + " · " : ""}${Math.round(r.latency)}ms`));
+  }
+  return { head, body: lines.join("\n") || "点按右侧按钮测速" };
 }
 
 (async () => {
   const isPanel = typeof $script !== "undefined" && $script.type === "generic";
   const isButton = typeof $trigger !== "undefined" && $trigger === "button";
 
-  if (isPanel && !isButton) {
-    const best = readJSON(KEY_BEST);
-    if (!best) return $done({ title: "B站 CDN 测速", content: "还没有结果，点按右侧按钮测速", icon: "play.tv" });
-    const s = summary(best, readJSON(KEY_RANK) || [{ host: best.host, latency: best.latency || 0, speed: best.speed }]);
-    return $done({ title: "B站 CDN · " + s.head.replace("最快：", ""), content: s.body, icon: "play.tv" });
+  if (!isPanel || isButton) await speedTest();
+  const s = summary();
+  if (!isPanel) {
+    console.log("[BiliCDN] " + s.head + "\n" + s.body);
+    if (NOTIFY) $notification.post("B站 CDN 测速", s.head, s.body);
+    return $done({});
   }
-
-  const { best, ranked } = await speedTest();
-  const s = summary(best, ranked);
-  console.log("[BiliCDN] " + s.head + "\n" + s.body);
-  if (NOTIFY && !isPanel) $notification.post("B站 CDN 测速", s.head, s.body);
-  $done(isPanel ? { title: "B站 CDN · " + shortName(best.host), content: s.body, icon: "play.tv" } : {});
+  $done({ title: "B站 CDN · " + s.head, content: s.body, icon: "play.tv" });
 })().catch((e) => {
   console.log("[BiliCDN] speedtest error: " + e);
   $done(typeof $script !== "undefined" && $script.type === "generic" ? { title: "B站 CDN 测速", content: "失败：" + e.message, icon: "exclamationmark.triangle" } : {});
