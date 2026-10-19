@@ -49,3 +49,8 @@ CNHK 的规则来自 [BiliBili-Redirect-tvOS](https://github.com/OctoLeft/BiliBi
 
 ## 维护
 改了脚本后，记得把模块里 `script-path` 末尾的 `?v=` 改成新的值。Surge 更新模块时只比较模块文件；脚本地址变了，才会重新下载脚本。
+
+## Apple TV 卡在第一个连接
+Apple TV 的播放器会优先用 QUIC（HTTP/3，走 UDP）连 `upos-hz-mirrorakam.akamaized.net`。在 Surge Dashboard 里能看到，这条 QUIC 连接经过 Surge 转发后，几分钟只下载了 15–17 KB，播放器就一直卡在这条连接上。手机走的是 TCP 分片，所以不受影响。
+
+模块里的 `[Rule]` 会拒绝发往 `akamaized.net`、`bilivideo.com`、`bilivideo.cn` 的 QUIC，播放器随即退回 TCP/HTTPS。

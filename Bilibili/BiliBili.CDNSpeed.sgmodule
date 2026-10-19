@@ -1,5 +1,5 @@
 #!name = 📺 BiliBili: ⚡ CDN Speed
-#!desc = 在 playurl 返回时把 B 站视频地址换成后台测出的最快线路（Akamai / 海外 ov / CNHK / upos）。视频分片不经过 MitM。替代 Biliverse Redirect，请勿同时启用
+#!desc = 在 playurl 返回时把 B 站视频地址换成后台测出的最快线路（Akamai / 海外 ov / CNHK / upos）。视频分片不经过 MitM，并拒绝视频 CDN 的 QUIC（Apple TV 上会卡死）。替代 Biliverse Redirect，请勿同时启用
 #!category = 🪐 Biliverse
 #!homepage = https://github.com/OctoLeft/surge/tree/main/Bilibili
 #!arguments = Cron:"*/30 * * * *",MaxAge:"120",CNHKPool:"",Build:"89600100",Buvid:"",TopN:"5",SampleKB:"2048",Notify:"false",Candidates:""
@@ -10,6 +10,11 @@ BiliCDN.PlayURL.grpc = type=http-response, pattern=^https?:\/\/(grpc\.biliapi\.n
 BiliCDN.PlayURL.json = type=http-response, pattern=^https?:\/\/api\.bili(bili\.com|api\.net)\/(x\/player\/(wbi\/)?playurl|pgc\/player\/(api|web)\/playurl(\/html5)?|pgc\/player\/web\/v2\/playurl)\?, requires-body=1, max-size=3145728, timeout=5, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-playurl.js?v=202610191144, argument="MaxAge={{{MaxAge}}}&CNHKPool={{{CNHKPool}}}&Build={{{Build}}}&Buvid={{{Buvid}}}"
 BiliCDN.SpeedTest = type=cron, cronexp="{{{Cron}}}", wake-system=0, timeout=120, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-speedtest.js?v=202610191144, argument="TopN={{{TopN}}}&SampleKB={{{SampleKB}}}&Notify={{{Notify}}}&Build={{{Build}}}&Buvid={{{Buvid}}}&Candidates={{{Candidates}}}"
 BiliCDN.Panel = type=generic, timeout=120, script-path=https://raw.githubusercontent.com/OctoLeft/surge/main/Bilibili/bili-cdn-speedtest.js?v=202610191144, argument="TopN={{{TopN}}}&SampleKB={{{SampleKB}}}&Notify=false&Build={{{Build}}}&Buvid={{{Buvid}}}&Candidates={{{Candidates}}}"
+
+[Rule]
+# Apple TV 的播放器会优先用 QUIC (HTTP/3) 连视频 CDN；经过 Surge 转发后 QUIC 几乎不传数据
+# （实测几分钟只下了 15 KB），播放器就一直卡在这条连接上。拒绝 QUIC 后它会退回 TCP/HTTPS。
+AND,((PROTOCOL,QUIC),(OR,((DOMAIN-SUFFIX,akamaized.net),(DOMAIN-SUFFIX,bilivideo.com),(DOMAIN-SUFFIX,bilivideo.cn)))),REJECT
 
 [Panel]
 BiliCDN.Panel = script-name=BiliCDN.Panel, update-interval=600
